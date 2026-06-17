@@ -54,6 +54,18 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
+    wait_for_shutdown_signal().await?;
+
+    broker.disconnect().await?;
+    discovery.withdraw(&cli.node_id).await?;
+    registry.shutdown().await?;
+
+    tracing::info!("shutdown complete");
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<()> {
     let mut signal = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
     )?;
@@ -67,10 +79,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    broker.disconnect().await?;
-    discovery.withdraw(&cli.node_id).await?;
-    registry.shutdown().await?;
+    Ok(())
+}
 
-    tracing::info!("shutdown complete");
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<()> {
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("received Ctrl+C, initiating graceful shutdown");
     Ok(())
 }

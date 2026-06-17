@@ -6,6 +6,7 @@ import getpass
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,8 @@ def current_commit_id() -> str:
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         commit = result.stdout.strip()
@@ -125,6 +128,14 @@ MODULES = [
         clean_cmd=["cargo", "clean"],
         build_dir=ROOT / "backend" / "target",
         env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
+        name="backend-api-tests",
+        language="Python/pytest",
+        dir=ROOT,
+        build_cmd=[sys.executable, "-m", "pytest", "tests"],
+        clean_cmd=["echo", "pytest has no build artifacts to clean"],
+        build_dir=None,
     ),
     Module(
         name="frontend",
@@ -266,7 +277,7 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
     if encryptly_bin is None:
         return False, f"encryptly binary not found ({encryptly_platform_help()})"
 
-    workspace = Path.home() / ".cache" / "tent-of-trials" / "encryptly-preflight"
+    workspace = select_logd_workspace()
     safe_dir = workspace / "safe"
     output_dir = workspace / "out"
     logd_path = output_dir / "preflight.logd"
@@ -312,7 +323,57 @@ class Colors:
     RESET = "\033[0m"
     GRAY = "\033[90m"
 
+
+def console_safe(text: object) -> str:
+    """Return text that can be printed on the active console encoding."""
+
+    value = str(text)
+    encoding = sys.stdout.encoding or "utf-8"
+    return value.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def redact_diagnostic_text(text: object) -> str:
+    """Redact local absolute paths from public diagnostic artifacts."""
+
+    value = str(text)
+    replacements = {
+        str(ROOT): "<repo>",
+        str(ROOT).replace("\\", "\\\\"): "<repo>",
+        str(Path.home()): "<home>",
+        str(Path.home()).replace("\\", "\\\\"): "<home>",
+    }
+    for env_name, label in (
+        ("USERPROFILE", "<home>"),
+        ("TEMP", "<temp>"),
+        ("TMP", "<temp>"),
+        ("LOCALAPPDATA", "<localappdata>"),
+        ("APPDATA", "<appdata>"),
+    ):
+        env_path = os.environ.get(env_name)
+        if env_path:
+            replacements[env_path] = label
+            replacements[env_path.replace("\\", "\\\\")] = label
+    username = os.environ.get("USERNAME") or getpass.getuser()
+    if username:
+        replacements[username] = "<user>"
+    for needle, replacement in replacements.items():
+        if needle:
+            value = value.replace(needle, replacement)
+    value = re.sub(
+        r"C:[\\/]+Users[\\/]+(?:<user>|[^\\/]+)[\\/]+Documents[\\/]+.*?[\\/]+zeroeye",
+        "<repo>",
+        value,
+    )
+    value = re.sub(
+        r"<home>[\\/]+Documents[\\/]+.*?[\\/]+zeroeye",
+        "<repo>",
+        value,
+    )
+    return value
+
+
 def color(text: str, code: str) -> str:
+    text = console_safe(text)
     if not sys.stdout.isatty():
         return text
     return f"{code}{text}{Colors.RESET}"
@@ -346,7 +407,7 @@ def build_module(
     verbose: bool = False,
 ) -> tuple[bool, float, str]:
 
-    print(f"\n  {color('▸', Colors.CYAN)} Building {color(module.name, Colors.BOLD)} ({module.language})...")
+    print(f"\n  {color('>', Colors.CYAN)} Building {color(module.name, Colors.BOLD)} ({module.language})...")
 
     env = os.environ.copy()
     if module.env:
@@ -364,6 +425,8 @@ def build_module(
                     cwd=str(module.dir),
                     capture_output=not verbose,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=120,
                     env={k: v for k, v in env.items() if k != "NODE_ENV"},
                 )
@@ -371,6 +434,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
@@ -382,6 +447,8 @@ def build_module(
                 cwd=str(module.dir),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
                 env=env,
             )
@@ -415,6 +482,8 @@ def build_module(
             cwd=str(module.dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=300,
         )
@@ -437,19 +506,21 @@ def build_module(
     return success, elapsed, output
 
 def clean_module(module: Module, verbose: bool = False) -> bool:
-    print(f"  {color('▸', Colors.YELLOW)} Cleaning {module.name}...")
+    print(f"  {color('>', Colors.YELLOW)} Cleaning {module.name}...")
     try:
         run_text_process(
             module.clean_cmd,
             cwd=str(module.dir),
             capture_output=not verbose,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
             env=os.environ.copy(),
         )
         return True
     except Exception as e:
-        print(f"    {color('✗', Colors.RED)} Clean failed: {e}")
+        print(f"    {color('[x]', Colors.RED)} Clean failed: {e}")
         return False
 
 def verify_binary(module: Module) -> Optional[str]:
@@ -485,8 +556,8 @@ def collect_system_info() -> str:
         "Tent of Trials - System Diagnostic Snapshot",
         "=" * 50,
         f"generated_at: {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
-        f"hostname: {platform.node()}",
-        f"user: {getpass.getuser()}",
+        "hostname: <redacted>",
+        "user: <redacted>",
         f"python: {sys.version}",
         f"platform: {platform.platform()}",
         f"processor: {platform.processor() or 'unknown'}",
@@ -563,8 +634,8 @@ def build_diagnostic_report(
                 "name": name,
                 "status": "PASS" if success else "FAIL",
                 "elapsed_seconds": round(elapsed, 3),
-                "artifact": binary,
-                "output": output,
+                "artifact": redact_diagnostic_text(binary) if binary else None,
+                "output": redact_diagnostic_text(output),
             }
             for name, success, elapsed, output, binary in results
         ],
@@ -578,8 +649,32 @@ def build_diagnostic_report(
 
 
 def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
-    metadata_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"    {color('✓', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
+    with metadata_path.open("w", encoding="utf-8", newline="\n") as fp:
+        fp.write(json.dumps(report, indent=2) + "\n")
+    print(f"    {color('[ok]', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
+
+
+def select_logd_workspace() -> Path:
+    """Return a writable workspace for the encrypted diagnostic bundle."""
+
+    candidates: list[Path] = []
+    env_workspace = os.environ.get("TENT_LOGD_WORKSPACE")
+    if env_workspace:
+        candidates.append(Path(env_workspace))
+    candidates.append(Path.home() / ".cache" / "tent-of-trials" / "logd-workspace")
+    candidates.append(ROOT / ".diagnostic-workspace" / "logd-workspace")
+
+    for workspace in candidates:
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            probe = workspace / ".write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return workspace
+        except OSError:
+            continue
+
+    raise RuntimeError("no writable diagnostic workspace found")
 
 
 def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
@@ -637,7 +732,7 @@ def generate_logd(
 ) -> bool:
     logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
     display_logd = logd_path.relative_to(ROOT)
-    print(f"\n  {color('▸', Colors.CYAN)} Finalizing diagnostics for {color(str(display_logd), Colors.BOLD)}...")
+    print(f"\n  {color('>', Colors.CYAN)} Finalizing diagnostics for {color(str(display_logd), Colors.BOLD)}...")
 
     # Always write the JSON report first. The encrypted .logd is useful, but the
     # report is required even when the build failed before compilation started or
@@ -661,9 +756,7 @@ def generate_logd(
         commit_diagnostic_artifacts([metadata_path], commit_id)
         return False
 
-    # Workspace must live under $HOME because encryptly refuses paths outside home.
-    home = Path.home()
-    workspace = home / ".cache" / "tent-of-trials" / "logd-workspace"
+    workspace = select_logd_workspace()
     safe_dir = workspace / "safe"
 
     try:
@@ -705,25 +798,40 @@ def generate_logd(
                 log_lines.append(output)
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
-        sr = run_text_process(
-            [
-                str(encryptly_bin),
-                "pack",
-                str(logd_path),
-                "--include",
-                str(workspace),
-                "--max-file-size",
-                "61440",
-            ],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=1500,
-        )
+        try:
+            sr = run_text_process(
+                [
+                    str(encryptly_bin),
+                    "pack",
+                    str(logd_path),
+                    "--include",
+                    str(workspace),
+                    "--max-file-size",
+                    "61440",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            error = "encryptly pack timed out after 300s"
+            print(
+                f"    {color('[x]', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
+                f"{error}"
+            )
+            if logd_path.exists():
+                logd_path.unlink()
+            write_diagnostic_report(
+                metadata_path,
+                build_diagnostic_report(results, commit_id, logd_error=error),
+            )
+            return False
+
         if sr.returncode != 0:
             error = sr.stderr.strip() or sr.stdout.strip() or "encryptly pack failed"
             print(
-                f"    {color('✗', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
+                f"    {color('[x]', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
                 f"{error}"
             )
             if logd_path.exists():
@@ -759,12 +867,12 @@ def generate_logd(
         for path in logd_files:
             size_kb = path.stat().st_size / 1024.0
             print(
-                f"    {color('✓', Colors.GREEN)} {path.relative_to(ROOT)} created "
+                f"    {color('[ok]', Colors.GREEN)} {path.relative_to(ROOT)} created "
                 f"({size_kb:.1f} KiB)"
             )
         if len(logd_files) > 1:
             print(
-                f"    {color('✓', Colors.GREEN)} split oversized diagnostic log into "
+                f"    {color('[ok]', Colors.GREEN)} split oversized diagnostic log into "
                 f"{len(logd_files)} chunks of at most {DIAGNOSTIC_CHUNK_SIZE // (1024 * 1024)} MiB"
             )
         if not commit_diagnostic_artifacts([metadata_path, *logd_files], commit_id):
@@ -795,7 +903,7 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
     total_time = sum(t for _, _, t, _, _ in results)
 
     for name, success, elapsed, output, binary in results:
-        status_icon = color("✓", Colors.GREEN) if success else color("✗", Colors.RED)
+        status_icon = color("[ok]", Colors.GREEN) if success else color("[x]", Colors.RED)
         status_text = color("PASS", Colors.GREEN) if success else color("FAIL", Colors.RED)
         time_str = f"{elapsed:.1f}s" if elapsed < 60 else f"{elapsed / 60:.1f}m"
 
@@ -809,7 +917,7 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
             for line in lines[-5:]:
                 print(f"       {color(line, Colors.GRAY)}")
 
-    print(f"\n  {color('─' * 40, Colors.GRAY)}")
+    print(f"\n  {color('-' * 40, Colors.GRAY)}")
     print(f"  {color('Total:', Colors.BOLD)} {total} modules, "
           f"{color(str(passed) + ' passed', Colors.GREEN)}, "
           f"{color(str(failed) + ' failed', Colors.RED)}, "
@@ -871,7 +979,7 @@ Diagnostic bundle:
     print(f"  {color('Checking prerequisites...', Colors.GRAY)}")
     missing = check_prerequisites()
     if missing:
-        print(f"\n  {color('⚠ Some tools missing  -  will try anyway:', Colors.YELLOW)}")
+        print(f"\n  {color('[warn] Some tools missing - will try anyway:', Colors.YELLOW)}")
         for m in missing:
             print(f"    {m}")
 
@@ -886,7 +994,7 @@ Diagnostic bundle:
         selected = [m for m in MODULES if m.name in names]
         not_found = set(names) - {m.name for m in MODULES}
         if not_found:
-            print(f"  {color('✗ Unknown modules:', Colors.RED)} {', '.join(not_found)}")
+            print(f"  {color('[x] Unknown modules:', Colors.RED)} {', '.join(not_found)}")
             print(f"    Available: {', '.join(m.name for m in MODULES)}")
             return 1
 
@@ -911,7 +1019,7 @@ Diagnostic bundle:
                     shutil.rmtree(artifact)
                 else:
                     artifact.unlink()
-                print(f"  {color('▸', Colors.YELLOW)} Removed {artifact.relative_to(ROOT)}")
+                print(f"  {color('>', Colors.YELLOW)} Removed {artifact.relative_to(ROOT)}")
         print(f"\n  {color('Clean complete.', Colors.GREEN)}")
         return 0
 

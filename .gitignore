@@ -22,6 +22,9 @@ frailbox/build/
 __pycache__/
 *.pyc
 *.pyo
+.coverage*
+.pytest_cache/
+.diagnostic-workspace/
 
 # OS
 .DS_Store
