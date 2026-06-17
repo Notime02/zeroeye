@@ -1,6 +1,9 @@
 package matching
 
 import (
+	"encoding/json"
+	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,12 +30,95 @@ type MatchingEngine struct {
 	mu         sync.RWMutex
 }
 
+const snapshotVersion = 1
+
+type engineSnapshot struct {
+	Version int                `json:"version"`
+	Books   []bookSnapshotData `json:"books"`
+}
+
+type bookSnapshotData struct {
+	Symbol types.Symbol    `json:"symbol"`
+	Data   json.RawMessage `json:"data"`
+}
+
 func NewMatchingEngine(config EngineConfig, books map[types.Symbol]*orderbook.OrderBook) *MatchingEngine {
 	return &MatchingEngine{
 		config: config,
 		books:  books,
 		trades: make([]*types.Trade, 0, 10000),
 	}
+}
+
+func (e *MatchingEngine) SnapshotOrderBooks() ([]byte, error) {
+	e.mu.RLock()
+	books := make(map[types.Symbol]*orderbook.OrderBook, len(e.books))
+	for symbol, book := range e.books {
+		books[symbol] = book
+	}
+	e.mu.RUnlock()
+
+	symbols := make([]string, 0, len(books))
+	for symbol := range books {
+		symbols = append(symbols, string(symbol))
+	}
+	sort.Strings(symbols)
+
+	snapshot := engineSnapshot{
+		Version: snapshotVersion,
+		Books:   make([]bookSnapshotData, 0, len(symbols)),
+	}
+	for _, rawSymbol := range symbols {
+		symbol := types.Symbol(rawSymbol)
+		bookData, err := books[symbol].Snapshot()
+		if err != nil {
+			return nil, fmt.Errorf("snapshot order book %s: %w", symbol, err)
+		}
+		snapshot.Books = append(snapshot.Books, bookSnapshotData{
+			Symbol: symbol,
+			Data:   json.RawMessage(bookData),
+		})
+	}
+
+	return json.Marshal(snapshot)
+}
+
+func (e *MatchingEngine) RecoverOrderBooks(data []byte) error {
+	var snapshot engineSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("decode matching engine snapshot: %w", err)
+	}
+	if snapshot.Version != snapshotVersion {
+		return fmt.Errorf("unsupported matching engine snapshot version %d", snapshot.Version)
+	}
+
+	e.mu.RLock()
+	books := make(map[types.Symbol]*orderbook.OrderBook, len(e.books))
+	for symbol, book := range e.books {
+		books[symbol] = book
+	}
+	e.mu.RUnlock()
+
+	seen := make(map[types.Symbol]struct{}, len(snapshot.Books))
+	for _, bookSnapshot := range snapshot.Books {
+		if bookSnapshot.Symbol == "" {
+			return fmt.Errorf("matching engine snapshot contains book without symbol")
+		}
+		if _, exists := seen[bookSnapshot.Symbol]; exists {
+			return fmt.Errorf("matching engine snapshot contains duplicate symbol %q", bookSnapshot.Symbol)
+		}
+		seen[bookSnapshot.Symbol] = struct{}{}
+
+		book, exists := books[bookSnapshot.Symbol]
+		if !exists {
+			return fmt.Errorf("matching engine snapshot has unconfigured symbol %q", bookSnapshot.Symbol)
+		}
+		if err := book.Recover(bookSnapshot.Data); err != nil {
+			return fmt.Errorf("recover order book %s: %w", bookSnapshot.Symbol, err)
+		}
+	}
+
+	return nil
 }
 
 func (e *MatchingEngine) PlaceOrder(order *types.Order) ([]*types.Trade, error) {
@@ -112,9 +198,9 @@ func (e *MatchingEngine) ValidateOrder(order *types.Order) error {
 }
 
 var (
-	ErrSymbolNotFound  = &EngineError{"symbol not found"}
-	ErrInvalidQuantity = &EngineError{"invalid quantity"}
-	ErrInvalidPrice    = &EngineError{"invalid price"}
+	ErrSymbolNotFound   = &EngineError{"symbol not found"}
+	ErrInvalidQuantity  = &EngineError{"invalid quantity"}
+	ErrInvalidPrice     = &EngineError{"invalid price"}
 	ErrShortingDisabled = &EngineError{"shorting disabled"}
 )
 
