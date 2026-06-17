@@ -259,6 +259,16 @@ def encryptly_platform_help() -> str:
     available = ", ".join(sorted(ENCRYPTLY_BINARIES))
     return f"detected {detected}; available: {available}"
 
+def make_encryptly_workspace(name: str) -> Path:
+    """Create a unique workspace under home so stale cache locks cannot block encryptly."""
+    home = Path.home().resolve()
+    try:
+        ROOT.resolve().relative_to(home)
+        base = ROOT / ".diagnostic-workspace"
+    except ValueError:
+        base = home / ".cache" / "tent-of-trials"
+    return base / f"{name}-{os.getpid()}-{int(time.time() * 1000)}"
+
 
 def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
     """Verify encryptly can create a diagnostic bundle before doing any build work."""
@@ -266,7 +276,7 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
     if encryptly_bin is None:
         return False, f"encryptly binary not found ({encryptly_platform_help()})"
 
-    workspace = Path.home() / ".cache" / "tent-of-trials" / "encryptly-preflight"
+    workspace = make_encryptly_workspace("encryptly-preflight")
     safe_dir = workspace / "safe"
     output_dir = workspace / "out"
     logd_path = output_dir / "preflight.logd"
@@ -317,6 +327,23 @@ def color(text: str, code: str) -> str:
         return text
     return f"{code}{text}{Colors.RESET}"
 
+
+def command_for_subprocess(command: str) -> str:
+    if os.name != "nt" or os.path.dirname(command) or Path(command).suffix:
+        return command
+    for extension in (".exe", ".cmd", ".bat"):
+        resolved = shutil.which(command + extension)
+        if resolved:
+            return resolved
+    return command
+
+
+def command_list_for_subprocess(cmd: list[str]) -> list[str]:
+    if not cmd:
+        return cmd
+    return [command_for_subprocess(cmd[0]), *cmd[1:]]
+
+
 def check_prerequisites() -> list[str]:
     required = {
         "cargo": "Rust",
@@ -360,7 +387,7 @@ def build_module(
             print(f"       {color('npm install...', Colors.GRAY)}")
             try:
                 install_result = run_text_process(
-                    ["npm", "install"],
+                    command_list_for_subprocess(["npm", "install"]),
                     cwd=str(module.dir),
                     capture_output=not verbose,
                     text=True,
@@ -371,14 +398,18 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
         build_type = "Release" if release else "Debug"
         try:
             cfg_result = run_text_process(
-                ["cmake", "-S", ".", "-B", "build",
-                 f"-DCMAKE_BUILD_TYPE={build_type}"],
+                command_list_for_subprocess([
+                    "cmake", "-S", ".", "-B", "build",
+                    f"-DCMAKE_BUILD_TYPE={build_type}",
+                ]),
                 cwd=str(module.dir),
                 capture_output=True,
                 text=True,
@@ -411,7 +442,7 @@ def build_module(
 
     try:
         result = run_text_process(
-            cmd,
+            command_list_for_subprocess(cmd),
             cwd=str(module.dir),
             capture_output=True,
             text=True,
@@ -578,7 +609,8 @@ def build_diagnostic_report(
 
 
 def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
-    metadata_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    with metadata_path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps(report, indent=2) + "\n")
     print(f"    {color('✓', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
 
 
@@ -662,8 +694,7 @@ def generate_logd(
         return False
 
     # Workspace must live under $HOME because encryptly refuses paths outside home.
-    home = Path.home()
-    workspace = home / ".cache" / "tent-of-trials" / "logd-workspace"
+    workspace = make_encryptly_workspace("logd-workspace")
     safe_dir = workspace / "safe"
 
     try:
@@ -711,7 +742,7 @@ def generate_logd(
                 "pack",
                 str(logd_path),
                 "--include",
-                str(workspace),
+                str(safe_dir),
                 "--max-file-size",
                 "61440",
             ],
