@@ -58,6 +58,11 @@ def run_text_process(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[st
 configure_text_encoding()
 
 
+def repo_relpath(path: Path) -> str:
+    """Return a repository-relative path using GitHub-style separators."""
+    return path.relative_to(ROOT).as_posix()
+
+
 def current_commit_id() -> str:
     """Return the first 4 bytes (8 hex chars) of HEAD for stable per-commit diagnostics."""
     try:
@@ -338,8 +343,10 @@ def redact_diagnostic_text(text: object) -> str:
     value = str(text)
     replacements = {
         str(ROOT): "<repo>",
+        ROOT.as_posix(): "<repo>",
         str(ROOT).replace("\\", "\\\\"): "<repo>",
         str(Path.home()): "<home>",
+        Path.home().as_posix(): "<home>",
         str(Path.home()).replace("\\", "\\\\"): "<home>",
     }
     for env_name, label in (
@@ -352,6 +359,7 @@ def redact_diagnostic_text(text: object) -> str:
         env_path = os.environ.get(env_name)
         if env_path:
             replacements[env_path] = label
+            replacements[Path(env_path).as_posix()] = label
             replacements[env_path.replace("\\", "\\\\")] = label
     username = os.environ.get("USERNAME") or getpass.getuser()
     if username:
@@ -611,7 +619,7 @@ def build_diagnostic_report(
 
     decrypt_target = logd_relpaths[0] if logd_relpaths and len(logd_relpaths) == 1 else None
     if logd_relpaths and len(logd_relpaths) > 1:
-        decrypt_target = str((DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT))
+        decrypt_target = repo_relpath(DIAGNOSTIC_DIR / f"build-{commit_id}.logd")
 
     report = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -651,7 +659,7 @@ def build_diagnostic_report(
 def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
     with metadata_path.open("w", encoding="utf-8", newline="\n") as fp:
         fp.write(json.dumps(report, indent=2) + "\n")
-    print(f"    {color('[ok]', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
+    print(f"    {color('[ok]', Colors.GREEN)} {repo_relpath(metadata_path)} created")
 
 
 def select_logd_workspace() -> Path:
@@ -684,7 +692,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✗', Colors.RED)} No diagnostic artifacts found to commit")
         return False
 
-    relpaths = [str(path.relative_to(ROOT)) for path in existing]
+    relpaths = [repo_relpath(path) for path in existing]
     status = run_text_process(
         ["git", "status", "--porcelain", "--", *relpaths],
         cwd=str(ROOT),
@@ -731,8 +739,8 @@ def generate_logd(
     verbose: bool = False,
 ) -> bool:
     logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
-    display_logd = logd_path.relative_to(ROOT)
-    print(f"\n  {color('>', Colors.CYAN)} Finalizing diagnostics for {color(str(display_logd), Colors.BOLD)}...")
+    display_logd = repo_relpath(logd_path)
+    print(f"\n  {color('>', Colors.CYAN)} Finalizing diagnostics for {color(display_logd, Colors.BOLD)}...")
 
     # Always write the JSON report first. The encrypted .logd is useful, but the
     # report is required even when the build failed before compilation started or
@@ -764,7 +772,7 @@ def generate_logd(
         safe_dir.mkdir(parents=True, exist_ok=True)
 
         (safe_dir / "system-info.txt").write_text(
-            collect_system_info(), encoding="utf-8"
+            redact_diagnostic_text(collect_system_info()), encoding="utf-8"
         )
 
         summary_lines = [
@@ -780,7 +788,7 @@ def generate_logd(
         for name, success, elapsed, _, binary in results:
             summary_lines.append(
                 f"  {name}: {'PASS' if success else 'FAIL'} ({elapsed:.2f}s)"
-                f"{f' [{binary}]' if binary else ''}"
+                f"{f' [{redact_diagnostic_text(binary)}]' if binary else ''}"
             )
         (safe_dir / "build-summary.txt").write_text(
             "\n".join(summary_lines), encoding="utf-8"
@@ -793,9 +801,9 @@ def generate_logd(
                 f"{'=' * 50}"
             )
             if binary:
-                log_lines.append(f"artifact: {binary}")
+                log_lines.append(f"artifact: {redact_diagnostic_text(binary)}")
             if output:
-                log_lines.append(output)
+                log_lines.append(redact_diagnostic_text(output))
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
         try:
@@ -817,7 +825,7 @@ def generate_logd(
         except subprocess.TimeoutExpired:
             error = "encryptly pack timed out after 300s"
             print(
-                f"    {color('[x]', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
+                f"    {color('[x]', Colors.RED)} {repo_relpath(logd_path)} creation failed: "
                 f"{error}"
             )
             if logd_path.exists():
@@ -831,7 +839,7 @@ def generate_logd(
         if sr.returncode != 0:
             error = sr.stderr.strip() or sr.stdout.strip() or "encryptly pack failed"
             print(
-                f"    {color('[x]', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
+                f"    {color('[x]', Colors.RED)} {repo_relpath(logd_path)} creation failed: "
                 f"{error}"
             )
             if logd_path.exists():
@@ -851,8 +859,8 @@ def generate_logd(
 
         safe_pw = sr.stdout.strip()
         logd_files = split_diagnostic_logd(logd_path)
-        logd_relpaths = [str(path.relative_to(ROOT)) for path in logd_files]
-        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else str(logd_path.relative_to(ROOT))
+        logd_relpaths = [repo_relpath(path) for path in logd_files]
+        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else repo_relpath(logd_path)
         write_diagnostic_report(
             metadata_path,
             build_diagnostic_report(
@@ -867,7 +875,7 @@ def generate_logd(
         for path in logd_files:
             size_kb = path.stat().st_size / 1024.0
             print(
-                f"    {color('[ok]', Colors.GREEN)} {path.relative_to(ROOT)} created "
+                f"    {color('[ok]', Colors.GREEN)} {repo_relpath(path)} created "
                 f"({size_kb:.1f} KiB)"
             )
         if len(logd_files) > 1:
@@ -885,7 +893,7 @@ def generate_logd(
             print(f"             diagnostic log file(s) and metadata file with this password.")
             if len(logd_files) > 1:
                 print(f"             Reassemble chunks in order before unpacking:")
-                print(f"             cat {' '.join(logd_relpaths)} > {logd_path.relative_to(ROOT)}")
+                print(f"             cat {' '.join(logd_relpaths)} > {repo_relpath(logd_path)}")
             print(f"  {color(safe_pw, Colors.CYAN)}")
             print(f"  {color(f'encryptly unpack {decrypt_target} <outdir> --password {safe_pw}', Colors.GRAY)}")
         return True
