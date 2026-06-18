@@ -2,7 +2,6 @@
 
 import argparse
 import datetime
-import getpass
 import json
 import os
 import platform
@@ -60,6 +59,24 @@ configure_text_encoding()
 def repo_relpath(path: Path) -> str:
     """Return a repository-relative path using GitHub-style separators."""
     return path.relative_to(ROOT).as_posix()
+
+
+def redact_local_paths(value: Optional[str]) -> Optional[str]:
+    """Remove local machine paths from diagnostic metadata and logs."""
+    if value is None:
+        return None
+
+    redacted = value
+    replacements = [
+        (str(ROOT), "<repo>"),
+        (ROOT.as_posix(), "<repo>"),
+        (str(Path.home()), "<home>"),
+        (Path.home().as_posix(), "<home>"),
+    ]
+    for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        if old:
+            redacted = redacted.replace(old, new)
+    return redacted
 
 
 def current_commit_id() -> str:
@@ -521,8 +538,8 @@ def collect_system_info() -> str:
         "Tent of Trials - System Diagnostic Snapshot",
         "=" * 50,
         f"generated_at: {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
-        f"hostname: {platform.node()}",
-        f"user: {getpass.getuser()}",
+        "hostname: <redacted>",
+        "user: <redacted>",
         f"python: {sys.version}",
         f"platform: {platform.platform()}",
         f"processor: {platform.processor() or 'unknown'}",
@@ -599,8 +616,8 @@ def build_diagnostic_report(
                 "name": name,
                 "status": "PASS" if success else "FAIL",
                 "elapsed_seconds": round(elapsed, 3),
-                "artifact": binary,
-                "output": output,
+                "artifact": redact_local_paths(binary),
+                "output": redact_local_paths(output),
             }
             for name, success, elapsed, output, binary in results
         ],
@@ -707,7 +724,7 @@ def generate_logd(
         safe_dir.mkdir(parents=True, exist_ok=True)
 
         (safe_dir / "system-info.txt").write_text(
-            collect_system_info(), encoding="utf-8"
+            redact_local_paths(collect_system_info()) or "", encoding="utf-8"
         )
 
         summary_lines = [
@@ -736,9 +753,9 @@ def generate_logd(
                 f"{'=' * 50}"
             )
             if binary:
-                log_lines.append(f"artifact: {binary}")
+                log_lines.append(f"artifact: {redact_local_paths(binary)}")
             if output:
-                log_lines.append(output)
+                log_lines.append(redact_local_paths(output) or "")
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
         sr = run_text_process(
