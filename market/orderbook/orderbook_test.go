@@ -7,47 +7,50 @@ import (
 
 func TestOrderBookDeltaValidation(t *testing.T) {
 	// Test malformed bid/ask price
-	malformedPrice := "abc"
-	_, err := validatePrice(malformedPrice)
-	if err == nil {
-		t.Errorf("Expected error for malformed price %s", malformedPrice)
+	malformedPrice := []byte(`{"price": "abc"}`)
+	if err := validateOrderBookDelta(malformedPrice); err == nil {
+		t.Errorf("expected error for malformed price, but got nil")
 	}
 
 	// Test malformed quantity
-	malformedQuantity := "abc"
-	_, err = validateQuantity(malformedQuantity)
-	if err == nil {
-		t.Errorf("Expected error for malformed quantity %s", malformedQuantity)
+	malformedQuantity := []byte(`{"quantity": "abc"}`)
+	if err := validateOrderBookDelta(malformedQuantity); err == nil {
+		t.Errorf("expected error for malformed quantity, but got nil")
 	}
 
 	// Test stale or out-of-order sequence updates
-	staleSequence := 0
-	_, err = validateSequence(staleSequence)
-	if err == nil {
-		t.Errorf("Expected error for stale sequence %d", staleSequence)
+	staleSequence := []byte(`{"sequence": 1}`)
+	if err := validateOrderBookDelta(staleSequence); err == nil {
+		t.Errorf("expected error for stale sequence, but got nil")
 	}
 
 	// Test valid snapshot followed by valid deltas
-	validSnapshot := []byte{"price": "10.0", "quantity": "100"}
-	validDelta := []byte{"price": "10.5", "quantity": "50"}
-	_, err = validateOrderBookDelta(validSnapshot, validDelta)
-	if err != nil {
-		t.Errorf("Expected no error for valid snapshot and delta")
+	validSnapshot := []byte(`{"snapshot": true}`)
+	validDelta := []byte(`{"delta": true}`)
+	if err := validateOrderBookDelta(validSnapshot); err != nil {
+		t.Errorf("expected no error for valid snapshot, but got %v", err)
+	}
+	if err := validateOrderBookDelta(validDelta); err != nil {
+		t.Errorf("expected no error for valid delta, but got %v", err)
 	}
 }
 
-func validatePrice(price string) (float64, error) {
-	// Implement price validation logic
-}
-
-func validateQuantity(quantity string) (int64, error) {
-	// Implement quantity validation logic
-}
-
-func validateSequence(sequence int64) (int64, error) {
-	// Implement sequence validation logic
-}
-
-func validateOrderBookDelta(snapshot, delta []byte) ([]byte, error) {
-	// Implement order book delta validation logic
+func validateOrderBookDelta(delta []byte) error {
+	var orderBookDelta struct {
+		Price  string `json:"price"`
+		Quantity string `json:"quantity"`
+		Side    string `json:"side"`
+		Symbol  string `json:"symbol"`
+		Sequence int    `json:"sequence"`
+	}
+	if err := json.Unmarshal(delta, &orderBookDelta); err != nil {
+		return err
+	}
+	if orderBookDelta.Price == "" || orderBookDelta.Quantity == "" || orderBookDelta.Side == "" || orderBookDelta.Symbol == "" {
+		return errors.New("malformed order book delta")
+	}
+	if orderBookDelta.Sequence < 1 {
+		return errors.New("stale or out-of-order sequence update")
+	}
+	return nil
 }
