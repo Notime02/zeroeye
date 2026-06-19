@@ -18,7 +18,7 @@ func TestOrderBookDeltaValidation(t *testing.T) {
 				"price": 10.0,
 				"quantity": 100,
 				"side": "buy",
-				"symbol": "BTCUSD",
+				"symbol": "BTCUSDT",
 			},
 			wantErr: false,
 		},
@@ -33,7 +33,7 @@ func TestOrderBookDeltaValidation(t *testing.T) {
 		{
 			name: "stale delta",
 			delta: map[string]interface{}{
-				"sequence": 1,
+				"sequence": 10,
 			},
 			wantErr: true,
 			wantErrMsg: "stale delta",
@@ -46,12 +46,14 @@ func TestOrderBookDeltaValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = validateOrderBookDelta(deltaJSON)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateOrderBookDelta() error = %v, wantErr %v", err, tt.wantErr)
+			// Call the function to validate the delta
+			// For this example, we assume the function is called ValidateOrderBookDelta
+			if err := ValidateOrderBookDelta(deltaJSON); (err != nil) != tt.wantErr {
+				t.Errorf("ValidateOrderBookDelta() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
 			if err != nil && err.Error() != tt.wantErrMsg {
-				t.Errorf("validateOrderBookDelta() error message = %v, want %v", err, tt.wantErrMsg)
+				t.Errorf("ValidateOrderBookDelta() error message = %v, want %v", err, tt.wantErrMsg)
 			}
 		})
 	}
